@@ -527,6 +527,24 @@ public class BetterBaritoneBuild extends Module {
         .build()
     );
 
+    private final Setting<Integer> clickDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("click-delay")
+        .description("Delay in milliseconds between each shift-click when fetching items. Set to your ping for high latency connections (e.g. 300 for 300ms ping).")
+        .defaultValue(150)
+        .min(50)
+        .sliderRange(50, 500)
+        .build()
+    );
+
+    private final Setting<Integer> resumeDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("resume-delay")
+        .description("Delay in milliseconds after fetching items before resuming the build. Increase on high latency to ensure all items are transferred.")
+        .defaultValue(500)
+        .min(0)
+        .sliderRange(0, 3000)
+        .build()
+    );
+
     public final Setting<Boolean> debugMode = sgGeneral.add(new BoolSetting.Builder()
         .name("debug-mode")
         .description("If enabled, the module will print debug information to the console.")
@@ -539,6 +557,8 @@ public class BetterBaritoneBuild extends Module {
     private static String buildCommand = "";
     private static EventRegistry.Event currentEvent = null;
     private BlockPos lastBlockInteractPos = null;
+    private int interactTimeoutTicks = 0;
+    private static final int INTERACT_TIMEOUT_TICKS = 100; // 5 seconds — retry if chest never opened
 
     @Override
     public void onActivate() {
@@ -663,13 +683,25 @@ public class BetterBaritoneBuild extends Module {
                 Logger.info("Executing event: %s", currentEvent.type.toString());
             }
 
-            if (currentEvent.bWaitOnPath && baritone.getPathingBehavior().hasPath() || baritone.getPathingBehavior().isPathing()) {
+            if (currentEvent.bWaitOnPath && (baritone.getPathingBehavior().hasPath() || baritone.getPathingBehavior().isPathing())) {
                 // Wait for Baritone to finish pathing
                 return;
             }
 
             currentEvent.callback.run();
             currentEvent = null;
+        }
+
+        // Retry interact if the chest never opened (common on high latency)
+        if (!FetchRegistry.INSTANCE.isEmpty() && EventRegistry.INSTANCE.isEmpty() && currentEvent == null && mc.currentScreen == null) {
+            interactTimeoutTicks++;
+            if (interactTimeoutTicks >= INTERACT_TIMEOUT_TICKS) {
+                interactTimeoutTicks = 0;
+                if (debugMode.get()) Logger.warn("Chest did not open in time, retrying fetch...");
+                StorageRegistry.INSTANCE.findItemAndPath(FetchRegistry.INSTANCE.get().getFirst().item);
+            }
+        } else {
+            interactTimeoutTicks = 0;
         }
     }
 
@@ -851,7 +883,6 @@ public class BetterBaritoneBuild extends Module {
                 if (handler == null) return;
 
                 MeteorExecutor.execute(() -> {
-                    boolean initial = true;
                     int count = 0;
 
                     int max = 27; // Default size for most chests, shulker boxes, etc.
@@ -860,13 +891,8 @@ public class BetterBaritoneBuild extends Module {
                     for (int i = 0; i < max; i++) {
                         if (!handler.getSlot(i).hasStack()) continue;
 
-                        int sleep;
-                        if (initial) {
-                            sleep = 50;
-                            initial = false;
-                        } else sleep = 70;
                         try {
-                            Thread.sleep(sleep);
+                            Thread.sleep(clickDelay.get());
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                             OmegawareAddons.LOG.error("Interrupted while sleeping in item fetch: {}", e.getMessage());
@@ -894,6 +920,12 @@ public class BetterBaritoneBuild extends Module {
                     FetchRegistry.INSTANCE.update();
 
                     if (FetchRegistry.INSTANCE.isEmpty()) {
+                        try {
+                            Thread.sleep(resumeDelay.get());
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        mc.setScreen(null);
                         baritone.getPathingBehavior().cancelEverything();
                         EventRegistry.INSTANCE.push(new EventRegistry.Event(EventRegistry.Event.EventType.Resume, false, () -> baritone.getCommandManager().execute(buildCommand)));
                     }
